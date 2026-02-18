@@ -132,8 +132,8 @@ async fn main() {
         .and_then(handle_trial)
         .with(cors);
 
-    println!("🚀 Trial service on 0.0.0.0:3030");
-    warp::serve(route).run(([0, 0, 0, 0], 3030)).await;
+    println!("🚀 Trial service on 127.0.0.1:3030");
+    warp::serve(route).run(([127, 0, 0, 1], 3030)).await;
 }
 
 /* ================= HANDLER ================= */

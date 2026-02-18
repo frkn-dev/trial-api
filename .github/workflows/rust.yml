@@ -31,7 +31,7 @@ jobs:
 
       - name: Check binary
         run: |
-          if [ -f "target/release/trial" ]; then
+          if [ -f "target/release/trial-api" ]; then
             echo "✅ Binary built successfully"
             file target/release/trial-api
             ls -lh target/release/trial-api

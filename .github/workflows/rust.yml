@@ -26,20 +26,15 @@ jobs:
       - name: Update apt package index
         run: sudo apt-get update
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get install -y protobuf-compiler
-          # Добавьте другие зависимости если нужно
-
       - name: Build Trial API
-        run: cargo build --release --no-default-features # Исправлено: добавлен пробел
+        run: cargo build --release --no-default-features
 
       - name: Check binary
         run: |
           if [ -f "target/release/trial" ]; then
             echo "✅ Binary built successfully"
-            file target/release/trial
-            ls -lh target/release/trial
+            file target/release/trial-api
+            ls -lh target/release/trial-api
           else
             echo "❌ Binary not found!"
             exit 1
@@ -49,6 +44,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: trial-api
-          path: target/release/trial
+          path: target/release/trial-api
           retention-days: 30
           if-no-files-found: error

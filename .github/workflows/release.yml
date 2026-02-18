@@ -47,7 +47,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: trial-api
-          path: artifacts/trial-api
+          path: artifacts
 
       - name: Prepare release files
         run: |

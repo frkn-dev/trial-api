@@ -52,7 +52,7 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir -p release
-          cp artifacts/api/trial-api release/trial-api-x86_64
+          cp artifacts/trial-api release/trial-api-x86_64
           chmod +x release/*
 
       - name: Release

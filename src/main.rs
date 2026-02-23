@@ -70,7 +70,7 @@ pub struct SubscriptionInstance {
 pub struct Subscription {
     pub id: Uuid,
     pub expires_at: String,
-    pub referred_by: Option<Uuid>,
+    pub referred_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub is_deleted: bool,

@@ -237,7 +237,8 @@ pub async fn create_subscription(env: &str, days: i64) -> anyhow::Result<Uuid> {
         cli.post(format!("{}/subscription", host))
             .json(&serde_json::json!({
                 "env": env,
-                "days": days
+                "days": days,
+                "referred_by": "FRKN-TRIAL"
             })),
     )
     .send()

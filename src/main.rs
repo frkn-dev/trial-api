@@ -21,7 +21,12 @@ const CSV_FILE: &str = "trials.csv";
 const DEFAULT_DAYS: i64 = 1;
 const DEFAULT_ENV: &str = "dev";
 
-const PROTOS: [&str; 3] = ["VlessTcpReality", "VlessGrpcReality", "VlessXhttpReality"];
+const PROTOS: [&str; 4] = [
+    "VlessTcpReality",
+    "VlessGrpcReality",
+    "VlessXhttpReality",
+    "Hysteria2",
+];
 
 /* ================= MODELS ================= */
 
@@ -170,8 +175,15 @@ async fn handle_trial(
 
     /* 2. CREATE CONNECTIONS */
     for proto in PROTOS {
-        if let Err(e) = create_connection(DEFAULT_ENV, proto, &sub_id).await {
-            eprintln!("❌ connection {} error: {}", proto, e);
+        if proto == "Hysteria2" {
+            let token = uuid::Uuid::new_v4();
+            if let Err(e) = create_connection(DEFAULT_ENV, proto, &sub_id, &Some(token)).await {
+                eprintln!("❌ connection {} error: {}", proto, e);
+            }
+        } else {
+            if let Err(e) = create_connection(DEFAULT_ENV, proto, &sub_id, &None).await {
+                eprintln!("❌ connection {} error: {}", proto, e);
+            }
         }
     }
 
@@ -243,19 +255,41 @@ pub async fn create_subscription(env: &str, days: i64) -> anyhow::Result<Uuid> {
     Ok(parsed.response.id)
 }
 
-pub async fn create_connection(env: &str, proto: &str, sub_id: &Uuid) -> anyhow::Result<String> {
+pub async fn create_connection(
+    env: &str,
+    proto: &str,
+    sub_id: &Uuid,
+    token: &Option<Uuid>,
+) -> anyhow::Result<String> {
     let host = std::env::var("FRKN_HOST")?;
     let cli = client();
 
-    let res = auth_headers(cli.await.post(format!("{}/connection", host)).json(
-        &serde_json::json!({
-            "env": env,
-            "proto": proto,
-            "subscription_id": sub_id
-        }),
-    ))
-    .send()
-    .await?;
+    let res = if let Some(token) = token {
+        auth_headers(
+            cli.await
+                .post(format!("{}/connection", host))
+                .json(&serde_json::json!({
+                    "env": env,
+                    "proto": proto,
+                    "subscription_id": sub_id,
+                    "token": token,
+                })),
+        )
+        .send()
+        .await?
+    } else {
+        auth_headers(
+            cli.await
+                .post(format!("{}/connection", host))
+                .json(&serde_json::json!({
+                    "env": env,
+                    "proto": proto,
+                    "subscription_id": sub_id
+                })),
+        )
+        .send()
+        .await?
+    };
 
     let status = res.status();
     let text = res.text().await?;

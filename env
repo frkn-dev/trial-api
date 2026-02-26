@@ -1,6 +1,6 @@
 export GMAIL_USER="example@gmail.com"
 export GMAIL_APP_PASSWORD="aaaa bbbb cccc dddd"
 
-export FRKN_API_TOKEN="supe4secrettoken"
+export FRKN_API_TOKEN="supetsecrettoken"
 export FRKN_HOST="http://127.0.0.1:5005"
 

@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use warp::Filter;
 
 use std::{
@@ -32,8 +33,22 @@ const PROTOS: [&str; 4] = [
 
 #[derive(Debug, Deserialize)]
 struct TrialRequest {
-    email: String,
+    email: Option<String>,
     telegram: Option<String>,
+    source: Option<TrialSource>,
+    env: Option<String>,
+}
+
+impl TrialRequest {
+    fn validate(&self) -> bool {
+        if self.email.is_none() && self.source.is_none() {
+            false
+        } else if self.email.is_some() && self.source.is_some() {
+            false
+        } else {
+            true
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -56,8 +71,9 @@ pub struct ApiResponse<T> {
 
 #[derive(Debug, Deserialize)]
 pub struct SubscriptionResponse {
-    pub id: Uuid,
-    pub instance: SubscriptionInstance,
+    pub status: u16,
+    pub message: String,
+    pub response: SubscriptionInstance,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,10 +83,18 @@ pub struct SubscriptionInstance {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SubscriptionEnvelope {
+    pub id: Uuid,
+    pub instance: SubscriptionInstance,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Subscription {
     pub id: Uuid,
     pub expires_at: String,
     pub referred_by: Option<String>,
+    pub refer_code: String,
+    pub bonus_days: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
     pub is_deleted: bool,
@@ -104,9 +128,24 @@ pub struct Connection {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ProtoWrapper {
+pub enum XrayProto {
+    VlessXhttpReality,
+    VlessGrpcReality,
+    VlessTcpReality,
+    Hysteria2,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Hysteria2Proto {
+    pub token: uuid::Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+pub enum ProtoWrapper {
     #[serde(rename = "Xray")]
-    pub xray: String,
+    Xray(XrayProto),
+    #[serde(rename = "Hysteria2")]
+    Hysteria2(Hysteria2Proto),
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,7 +155,23 @@ pub struct ConnectionStat {
     pub online: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub enum TrialSource {
+    Mobile,
+    Site,
+}
+
+impl fmt::Display for TrialSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TrialSource::Mobile => write!(f, "trial-mobile"),
+            TrialSource::Site => write!(f, "trial-site"),
+        }
+    }
+}
+
 type Store = Arc<Mutex<HashMap<String, DateTime<Utc>>>>;
+type HttpClient = Client;
 
 /* ================= MAIN ================= */
 
@@ -124,6 +179,9 @@ type Store = Arc<Mutex<HashMap<String, DateTime<Utc>>>>;
 async fn main() {
     let store: Store = Arc::new(Mutex::new(load_trials()));
     let store_filter = warp::any().map(move || store.clone());
+
+    let http = Client::new();
+    let http_filter = warp::any().map(move || http.clone());
 
     let cors = warp::cors()
         .allow_any_origin()
@@ -134,6 +192,7 @@ async fn main() {
         .and(warp::path("trial"))
         .and(warp::body::json())
         .and(store_filter)
+        .and(http_filter)
         .and_then(handle_trial)
         .with(cors);
 
@@ -146,10 +205,25 @@ async fn main() {
 async fn handle_trial(
     req: TrialRequest,
     store: Store,
+    http: HttpClient,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    {
-        let guard = store.lock().unwrap();
-        if guard.contains_key(&req.email) {
+    if !req.validate() {
+        return Ok(warp::reply::json(&TrialResponse {
+            status: "error".into(),
+            message: "Trial request is not valid".into(),
+            sub_id: None,
+        }));
+    }
+
+    let email = req.email.clone();
+
+    /* ================= ATOMIC TRIAL CHECK ================= */
+
+    if let Some(ref email) = email {
+        let mut guard = store.lock().unwrap();
+
+        // insert returns old value if existed
+        if guard.insert(email.clone(), Utc::now()).is_some() {
             return Ok(warp::reply::json(&TrialResponse {
                 status: "error".into(),
                 message: "Trial already requested".into(),
@@ -160,8 +234,12 @@ async fn handle_trial(
 
     let now = Utc::now();
 
-    /* 1. CREATE SUBSCRIPTION */
-    let sub_id = match create_subscription(DEFAULT_ENV, DEFAULT_DAYS).await {
+    /* ================= CREATE SUB ================= */
+
+    let referred_by = req.source.unwrap_or(TrialSource::Site);
+    let env = req.env.as_deref().unwrap_or("DEFAULT_ENV");
+
+    let sub_id = match create_subscription(&http, env, DEFAULT_DAYS, &referred_by).await {
         Ok(id) => id,
         Err(e) => {
             eprintln!("❌ subscription error: {}", e);
@@ -173,52 +251,56 @@ async fn handle_trial(
         }
     };
 
-    /* 2. CREATE CONNECTIONS */
-    for proto in PROTOS {
-        if proto == "Hysteria2" {
-            let token = uuid::Uuid::new_v4();
-            if let Err(e) = create_connection(DEFAULT_ENV, proto, &sub_id, &Some(token)).await {
-                eprintln!("❌ connection {} error: {}", proto, e);
+    /* ================= CONNECTIONS PARALLEL ================= */
+
+    use futures::future::join_all;
+
+    let futures = PROTOS.iter().map(|proto| {
+        let http = http.clone();
+        let sub_id = sub_id;
+
+        async move {
+            if *proto == "Hysteria2" {
+                let token = Uuid::new_v4();
+                create_connection(&http, DEFAULT_ENV, proto, &sub_id, &Some(token)).await
+            } else {
+                create_connection(&http, DEFAULT_ENV, proto, &sub_id, &None).await
             }
-        } else {
-            if let Err(e) = create_connection(DEFAULT_ENV, proto, &sub_id, &None).await {
-                eprintln!("❌ connection {} error: {}", proto, e);
-            }
+        }
+    });
+
+    for r in join_all(futures).await {
+        if let Err(e) = r {
+            eprintln!("❌ connection error: {}", e);
         }
     }
 
-    /* 3. SAVE */
-    {
-        let mut guard = store.lock().unwrap();
-        guard.insert(req.email.clone(), Utc::now());
-    }
+    /* ================= SAVE + EMAIL ================= */
 
-    save_trial(
-        &req.email,
-        req.telegram.as_deref(),
-        &sub_id,
-        DEFAULT_ENV,
-        &now,
-    )
-    .ok();
+    if let Some(email) = email {
+        if let Err(e) = save_trial(&email, req.telegram.as_deref(), &sub_id, DEFAULT_ENV, &now) {
+            eprintln!("csv error: {}", e);
+        }
 
-    /* 4. EMAIL */
-    if let Err(e) = send_email(&req.email, &sub_id).await {
-        eprintln!("📧 email error: {}", e);
+        if let Err(e) = send_email(&email, &sub_id).await {
+            eprintln!("📧 email error: {}", e);
+        }
+
+        return Ok(warp::reply::json(&TrialResponse {
+            status: "ok".into(),
+            message: "Trial activated. Check your email.".into(),
+            sub_id: Some(sub_id.to_string()),
+        }));
     }
 
     Ok(warp::reply::json(&TrialResponse {
         status: "ok".into(),
-        message: "Trial activated. Check your email.".into(),
+        message: "Trial activated.".into(),
         sub_id: Some(sub_id.to_string()),
     }))
 }
 
 /* ================= FRKN API ================= */
-
-async fn client() -> Client {
-    Client::new()
-}
 
 fn auth_headers(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     req.header(
@@ -229,16 +311,20 @@ fn auth_headers(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     .header("Content-Type", "application/json")
 }
 
-pub async fn create_subscription(env: &str, days: i64) -> anyhow::Result<Uuid> {
+async fn create_subscription(
+    http: &Client,
+    env: &str,
+    days: i64,
+    referred_by: &TrialSource,
+) -> anyhow::Result<Uuid> {
     let host = std::env::var("FRKN_HOST")?;
-    let cli = Client::new();
 
     let res = auth_headers(
-        cli.post(format!("{}/subscription", host))
+        http.post(format!("{}/subscription", host))
             .json(&serde_json::json!({
                 "env": env,
                 "days": days,
-                "referred_by": "FRKN-TRIAL"
+                "referred_by": referred_by.to_string()
             })),
     )
     .send()
@@ -247,28 +333,25 @@ pub async fn create_subscription(env: &str, days: i64) -> anyhow::Result<Uuid> {
     let status = res.status();
     let text = res.text().await?;
 
-    if !status.is_success() {
-        anyhow::bail!("API error {}: {}", status, text);
-    }
+    println!("STATUS = {}", status);
+    println!("BODY = {}", text);
 
-    let parsed: ApiResponse<SubscriptionResponse> = serde_json::from_str(&text)?;
-
+    let parsed: ApiResponse<SubscriptionEnvelope> = serde_json::from_str(&text)?;
     Ok(parsed.response.id)
 }
 
 pub async fn create_connection(
+    http: &Client,
     env: &str,
     proto: &str,
     sub_id: &Uuid,
     token: &Option<Uuid>,
 ) -> anyhow::Result<String> {
     let host = std::env::var("FRKN_HOST")?;
-    let cli = client();
 
     let res = if let Some(token) = token {
         auth_headers(
-            cli.await
-                .post(format!("{}/connection", host))
+            http.post(format!("{}/connection", host))
                 .json(&serde_json::json!({
                     "env": env,
                     "proto": proto,
@@ -280,8 +363,7 @@ pub async fn create_connection(
         .await?
     } else {
         auth_headers(
-            cli.await
-                .post(format!("{}/connection", host))
+            http.post(format!("{}/connection", host))
                 .json(&serde_json::json!({
                     "env": env,
                     "proto": proto,
@@ -294,6 +376,8 @@ pub async fn create_connection(
 
     let status = res.status();
     let text = res.text().await?;
+
+    println!("Connection resp: {}", text);
 
     if text.is_empty() {
         anyhow::bail!("empty connection response, status = {}", status);
